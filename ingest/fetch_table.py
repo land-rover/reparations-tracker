@@ -220,7 +220,8 @@ def _fetch_via_playwright(source_url: str) -> list[dict] | None:
         logger.warning("nest_asyncio not installed; Playwright may fail in Colab")
 
     try:
-        records = asyncio.run(_playwright_async(source_url))
+        loop = asyncio.get_event_loop()
+        records = loop.run_until_complete(_playwright_async(source_url))
         return records if records else None
     except Exception as exc:  # noqa: BLE001
         logger.warning("Playwright async fetch failed: %s", exc)
