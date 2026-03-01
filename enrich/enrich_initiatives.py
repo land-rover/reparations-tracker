@@ -128,22 +128,46 @@ def _download_tiger_place(base_url: str, cache_dir: Path) -> None:
 
 
 def _ensure_tiger_cd(settings) -> gpd.GeoDataFrame:
-    """Download (once) and load the 119th Congress district shapefile."""
-    cache_path = Path(settings.TIGER_CD_CACHE_PATH)
-    cache_path.parent.mkdir(parents=True, exist_ok=True)
+    """Download (once) and load all 119th Congress district shapefiles (per-state)."""
+    cache_dir = Path(settings.TIGER_CD_CACHE_DIR)
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    complete_sentinel = Path(settings.TIGER_CD_COMPLETE)
 
-    if not cache_path.exists():
-        logger.info("Downloading congressional district boundaries")
-        with requests.get(settings.TIGER_CD_URL, stream=True, timeout=120) as r:
-            r.raise_for_status()
-            with open(cache_path, "wb") as fh:
-                for chunk in r.iter_content(chunk_size=1 << 20):
-                    fh.write(chunk)
+    if complete_sentinel.exists():
+        logger.info("Loading CD119 from cache (%s)", cache_dir)
+    else:
+        logger.info("Downloading CD119 shapefiles (per-state)")
+        base_url = settings.TIGER_CD_URL.rstrip("/")
+        for fips in STATE_FIPS.values():
+            filename = f"tl_2024_{fips}_cd119.zip"
+            dest = cache_dir / filename
+            if dest.exists():
+                continue
+            url = f"{base_url}/{filename}"
+            try:
+                with requests.get(url, stream=True, timeout=60) as r:
+                    r.raise_for_status()
+                    with open(dest, "wb") as fh:
+                        for chunk in r.iter_content(chunk_size=1 << 20):
+                            fh.write(chunk)
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("Could not download %s: %s", url, exc)
+        complete_sentinel.touch()
 
-    gdf = gpd.read_file(f"zip://{cache_path}")
-    gdf = gdf.to_crs(epsg=4326)
-    logger.info("Loaded %d congressional districts", len(gdf))
-    return gdf
+    gdfs = []
+    for zip_path in sorted(cache_dir.glob("tl_2024_*_cd119.zip")):
+        try:
+            gdf = gpd.read_file(f"zip://{zip_path}")
+            gdfs.append(gdf)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Could not read %s: %s", zip_path, exc)
+
+    if not gdfs:
+        raise RuntimeError(f"No CD119 zip files found in {cache_dir}")
+
+    result = pd.concat(gdfs, ignore_index=True).to_crs(epsg=4326)
+    logger.info("Loaded %d congressional districts", len(result))
+    return result
 
 
 def _ensure_tiger_state(settings) -> gpd.GeoDataFrame:

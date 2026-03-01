@@ -13,14 +13,14 @@ ERRORS_LOG_PATH        = f"{DATA_BASE}/errors.log"
 # TIGER/Line cache paths
 TIGER_PLACE_CACHE_DIR  = f"{DATA_BASE}/tiger_place/"
 TIGER_PLACE_COMPLETE   = f"{DATA_BASE}/tiger_place/.complete"
-TIGER_CD_CACHE_PATH    = f"{DATA_BASE}/tiger_cd/tl_2025_us_cd119.zip"
+TIGER_CD_CACHE_DIR     = f"{DATA_BASE}/tiger_cd/"
+TIGER_CD_COMPLETE      = f"{DATA_BASE}/tiger_cd/.complete"
 TIGER_STATE_CACHE_PATH = f"{DATA_BASE}/tiger_state/tl_2024_us_state.zip"
 
 # TIGER/Line source URLs
-# CD119: 119th Congress started Jan 2025 — file is in TIGER2025
-# Place + State: TIGER2024 is current and sufficient
+# CD119: per-state files (tl_2024_{fips}_cd119.zip) — no single national file exists
 TIGER_PLACE_URL  = "https://www2.census.gov/geo/tiger/TIGER2024/PLACE/"
-TIGER_CD_URL     = "https://www2.census.gov/geo/tiger/TIGER2025/CD/tl_2025_us_cd119.zip"
+TIGER_CD_URL     = "https://www2.census.gov/geo/tiger/TIGER2024/CD/"
 TIGER_STATE_URL  = "https://www2.census.gov/geo/tiger/TIGER2024/STATE/tl_2024_us_state.zip"
 
 SOURCE_URL = "https://www.reparationsresources.com/table"

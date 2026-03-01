@@ -398,8 +398,14 @@ def _build_districts_geojson(settings, enriched_geojson: str, legislators_json: 
         dist_map[bid]["initiative_ids"].add(p.get("initiative_id", ""))
 
     # Load district polygons from TIGER cache
-    cd_path = settings.TIGER_CD_CACHE_PATH
-    districts_gdf = gpd.read_file(f"zip://{cd_path}").to_crs(epsg=4326)
+    import glob as _glob  # noqa: PLC0415
+    cd_dir = settings.TIGER_CD_CACHE_DIR
+    cd_zips = sorted(_glob.glob(f"{cd_dir}tl_2024_*_cd119.zip"))
+    if not cd_zips:
+        raise RuntimeError(f"No CD119 zip files found in {cd_dir} — run Step 2 first")
+    districts_gdf = pd.concat(
+        [gpd.read_file(f"zip://{z}") for z in cd_zips], ignore_index=True
+    ).to_crs(epsg=4326)
 
     features = []
     for _, row in districts_gdf.iterrows():
