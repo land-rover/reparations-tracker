@@ -152,58 +152,79 @@ def _normalise_rest_record(attrs: dict) -> dict:
 
 
 # ---------------------------------------------------------------------------
-# Strategy 2: Playwright headless browser
+# Strategy 2: Playwright headless browser (async API for Colab/Jupyter compat)
 # ---------------------------------------------------------------------------
 
-def _fetch_via_playwright(source_url: str) -> list[dict] | None:
-    """Use Playwright + headless Chromium to render the page and extract the table."""
-    try:
-        from playwright.sync_api import sync_playwright  # noqa: PLC0415
-    except ImportError:
-        logger.warning("Playwright not available; skipping headless browser strategy")
-        return None
+async def _playwright_async(source_url: str) -> list[dict]:
+    """Async Playwright coroutine — works inside Colab's running event loop."""
+    from playwright.async_api import async_playwright  # noqa: PLC0415
 
-    records = []
-    with sync_playwright() as p:
-        browser = p.chromium.launch(headless=True)
-        page = browser.new_page()
-        page.goto(source_url, wait_until="networkidle", timeout=60_000)
+    captured_json: list[dict] = []
+    html = ""
 
-        # Try to intercept XHR/fetch calls to capture JSON data
-        captured_json: list[dict] = []
+    async with async_playwright() as p:
+        browser = await p.chromium.launch(headless=True)
+        page = await browser.new_page()
 
-        def _handle_response(response):
+        async def _handle_response(response):
             if "FeatureServer" in response.url and "/query" in response.url:
                 try:
-                    body = response.json()
+                    body = await response.json()
                     if "features" in body:
                         captured_json.extend(body["features"])
                 except Exception:  # noqa: BLE001
                     pass
 
         page.on("response", _handle_response)
+        await page.goto(source_url, wait_until="networkidle", timeout=60_000)
 
-        # Wait up to 15 s for any table-like element
         try:
-            page.wait_for_selector("table, [role='grid'], [role='table']", timeout=15_000)
+            await page.wait_for_selector(
+                "table, [role='grid'], [role='table']", timeout=15_000
+            )
         except Exception:  # noqa: BLE001
             logger.debug("No table selector found; will parse full DOM")
 
-        # Give dynamic content extra time
-        time.sleep(3)
+        await page.wait_for_timeout(3000)  # let dynamic content settle
 
-        # If we captured FeatureServer JSON responses, use those
-        if captured_json:
-            browser.close()
-            return [_normalise_rest_record(f.get("attributes", {})) for f in captured_json]
+        if not captured_json:
+            html = await page.content()
 
-        html = page.content()
-        browser.close()
+        await browser.close()
 
-    # Parse extracted HTML
+    if captured_json:
+        return [_normalise_rest_record(f.get("attributes", {})) for f in captured_json]
+
     soup = BeautifulSoup(html, "html.parser")
-    records = _parse_html_table(soup)
-    return records if records else None
+    return _parse_html_table(soup)
+
+
+def _fetch_via_playwright(source_url: str) -> list[dict] | None:
+    """Use Playwright + headless Chromium to render the page and extract the table.
+
+    Uses the async API so it works inside Colab/Jupyter's running asyncio loop.
+    nest_asyncio is applied to allow asyncio.run() inside an existing loop.
+    """
+    try:
+        from playwright.async_api import async_playwright  # noqa: F401, PLC0415
+    except ImportError:
+        logger.warning("Playwright not available; skipping headless browser strategy")
+        return None
+
+    import asyncio  # noqa: PLC0415
+
+    try:
+        import nest_asyncio  # noqa: PLC0415
+        nest_asyncio.apply()
+    except ImportError:
+        logger.warning("nest_asyncio not installed; Playwright may fail in Colab")
+
+    try:
+        records = asyncio.run(_playwright_async(source_url))
+        return records if records else None
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("Playwright async fetch failed: %s", exc)
+        return None
 
 
 def _parse_html_table(soup: BeautifulSoup) -> list[dict]:
