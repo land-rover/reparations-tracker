@@ -152,11 +152,100 @@ def _normalise_rest_record(attrs: dict) -> dict:
 
 
 # ---------------------------------------------------------------------------
-# Strategy 2: Playwright headless browser (async API for Colab/Jupyter compat)
+# Strategy 2: Selenium + Chrome (primary browser strategy — works in Colab)
+# ---------------------------------------------------------------------------
+
+def _fetch_via_selenium(source_url: str) -> list[dict] | None:
+    """
+    Use Selenium + headless Chrome to render the page.
+
+    Colab ships Chrome and chromedriver; Selenium Manager (selenium>=4.6)
+    locates them automatically — no manual driver install needed.
+    Also probes network logs for FeatureServer XHR responses captured via CDP.
+    """
+    try:
+        from selenium import webdriver  # noqa: PLC0415
+        from selenium.webdriver.chrome.options import Options  # noqa: PLC0415
+    except ImportError:
+        logger.warning("Selenium not available; skipping")
+        return None
+
+    options = Options()
+    options.add_argument("--headless")
+    options.add_argument("--no-sandbox")
+    options.add_argument("--disable-dev-shm-usage")
+    options.add_argument("--disable-gpu")
+    options.add_argument("--window-size=1920,1080")
+    options.set_capability("goog:loggingPrefs", {"performance": "ALL"})
+
+    try:
+        driver = webdriver.Chrome(options=options)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("Selenium: could not start Chrome driver: %s", exc)
+        return None
+
+    try:
+        driver.get(source_url)
+        time.sleep(6)  # let XHR calls and JS rendering complete
+
+        # --- Try to capture FeatureServer responses from CDP network logs ---
+        captured_json: list[dict] = []
+        try:
+            perf_logs = driver.get_log("performance")
+            for entry in perf_logs:
+                msg = json.loads(entry["message"])["message"]
+                if msg.get("method") != "Network.responseReceived":
+                    continue
+                url = msg.get("params", {}).get("response", {}).get("url", "")
+                if "FeatureServer" in url and "/query" in url:
+                    request_id = msg["params"]["requestId"]
+                    try:
+                        body = driver.execute_cdp_cmd(
+                            "Network.getResponseBody", {"requestId": request_id}
+                        )
+                        data = json.loads(body.get("body", "{}"))
+                        if "features" in data:
+                            captured_json.extend(data["features"])
+                    except Exception:  # noqa: BLE001
+                        pass
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("Selenium CDP log capture failed: %s", exc)
+
+        if captured_json:
+            logger.info("Selenium: captured %d features from FeatureServer XHR", len(captured_json))
+            return [_normalise_rest_record(f.get("attributes", {})) for f in captured_json]
+
+        # --- Scan rendered DOM for embedded FeatureServer URLs ---
+        page_source = driver.page_source
+        matches = re.findall(r'https?://[^"\'<>\s]+?/FeatureServer(?:/\d+)?', page_source)
+        if matches:
+            rest_url = matches[0]
+            if not rest_url.endswith("/0"):
+                rest_url = rest_url.rstrip("/") + "/0"
+            logger.info("Selenium: found FeatureServer URL in rendered DOM: %s", rest_url)
+            records = _fetch_via_rest(rest_url)
+            if records:
+                return records
+
+        # --- Fall back to parsing the rendered HTML table ---
+        soup = BeautifulSoup(page_source, "html.parser")
+        records = _parse_html_table(soup)
+        if records:
+            return records
+
+        logger.warning("Selenium: page loaded but no data extracted")
+        return None
+
+    finally:
+        driver.quit()
+
+
+# ---------------------------------------------------------------------------
+# Strategy 3: Playwright async (fallback for non-Colab environments)
 # ---------------------------------------------------------------------------
 
 async def _playwright_async(source_url: str) -> list[dict]:
-    """Async Playwright coroutine — works inside Colab's running event loop."""
+    """Async Playwright coroutine — fallback when Selenium is unavailable."""
     from playwright.async_api import async_playwright  # noqa: PLC0415
 
     captured_json: list[dict] = []
@@ -185,7 +274,7 @@ async def _playwright_async(source_url: str) -> list[dict]:
         except Exception:  # noqa: BLE001
             logger.debug("No table selector found; will parse full DOM")
 
-        await page.wait_for_timeout(3000)  # let dynamic content settle
+        await page.wait_for_timeout(3000)
 
         if not captured_json:
             html = await page.content()
@@ -200,15 +289,11 @@ async def _playwright_async(source_url: str) -> list[dict]:
 
 
 def _fetch_via_playwright(source_url: str) -> list[dict] | None:
-    """Use Playwright + headless Chromium to render the page and extract the table.
-
-    Uses the async API so it works inside Colab/Jupyter's running asyncio loop.
-    nest_asyncio is applied to allow asyncio.run() inside an existing loop.
-    """
+    """Playwright fallback — used when Selenium is not available."""
     try:
         from playwright.async_api import async_playwright  # noqa: F401, PLC0415
     except ImportError:
-        logger.warning("Playwright not available; skipping headless browser strategy")
+        logger.warning("Playwright not available; skipping")
         return None
 
     import asyncio  # noqa: PLC0415
@@ -217,7 +302,7 @@ def _fetch_via_playwright(source_url: str) -> list[dict] | None:
         import nest_asyncio  # noqa: PLC0415
         nest_asyncio.apply()
     except ImportError:
-        logger.warning("nest_asyncio not installed; Playwright may fail in Colab")
+        pass
 
     try:
         loop = asyncio.get_event_loop()
@@ -319,27 +404,36 @@ def run(settings) -> list[dict]:
     else:
         logger.warning("Strategy 1: no FeatureServer URL found in page source")
 
-    # --- Strategy 2: Playwright ---
+    # --- Strategy 2: Selenium + Chrome ---
     if not records:
-        logger.info("Trying Strategy 2 (Playwright headless browser)")
+        logger.info("Trying Strategy 2 (Selenium + headless Chrome)")
+        records = _fetch_via_selenium(source_url)
+        if records:
+            logger.info("Strategy 2 (Selenium): fetched %d records", len(records))
+        else:
+            logger.warning("Strategy 2 (Selenium): returned no records")
+
+    # --- Strategy 3: Playwright async (non-Colab fallback) ---
+    if not records:
+        logger.info("Trying Strategy 3 (Playwright async)")
         records = _fetch_via_playwright(source_url)
         if records:
-            logger.info("Strategy 2 (Playwright): fetched %d records", len(records))
+            logger.info("Strategy 3 (Playwright): fetched %d records", len(records))
         else:
-            logger.warning("Strategy 2 (Playwright): returned no records")
+            logger.warning("Strategy 3 (Playwright): returned no records")
 
-    # --- Strategy 3: Plain BS4 ---
+    # --- Strategy 4: Plain BS4 ---
     if not records:
-        logger.info("Trying Strategy 3 (requests + BeautifulSoup)")
+        logger.info("Trying Strategy 4 (requests + BeautifulSoup)")
         records = _fetch_via_bs4(source_url)
         if records:
-            logger.info("Strategy 3 (BS4): fetched %d records", len(records))
+            logger.info("Strategy 4 (BS4): fetched %d records", len(records))
         else:
-            logger.warning("Strategy 3 (BS4): returned no records")
+            logger.warning("Strategy 4 (BS4): returned no records")
 
     if not records:
         raise RuntimeError(
-            f"All three fetch strategies failed for {source_url}. "
+            f"All four fetch strategies failed for {source_url}. "
             "Check network connectivity and that the source site is reachable."
         )
 

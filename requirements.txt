@@ -1,5 +1,6 @@
 requests
 beautifulsoup4
+selenium
 playwright
 nest_asyncio
 geopandas
