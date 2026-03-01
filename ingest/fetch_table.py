@@ -187,122 +187,7 @@ def _normalise_rest_record(attrs: dict) -> dict:
 
 
 # ---------------------------------------------------------------------------
-# Strategy 2: Selenium + Chrome (primary browser strategy — works in Colab)
-# ---------------------------------------------------------------------------
-
-def _fetch_via_selenium(source_url: str) -> list[dict] | None:
-    """
-    Use Selenium + headless Chrome to render the page.
-
-    Colab ships Chrome and chromedriver; Selenium Manager (selenium>=4.6)
-    locates them automatically — no manual driver install needed.
-    Also probes network logs for FeatureServer XHR responses captured via CDP.
-    """
-    try:
-        from selenium import webdriver  # noqa: PLC0415
-        from selenium.webdriver.chrome.options import Options  # noqa: PLC0415
-    except ImportError:
-        logger.warning("Selenium not available; skipping")
-        return None
-
-    import shutil  # noqa: PLC0415
-    from selenium.webdriver.chrome.service import Service  # noqa: PLC0415
-
-    options = Options()
-    options.add_argument("--headless")
-    options.add_argument("--no-sandbox")
-    options.add_argument("--disable-dev-shm-usage")
-    options.add_argument("--disable-gpu")
-    options.add_argument("--window-size=1920,1080")
-    options.set_capability("goog:loggingPrefs", {"performance": "ALL"})
-
-    # Detect Chrome binary
-    _chrome_bin = (
-        shutil.which("google-chrome")
-        or shutil.which("google-chrome-stable")
-        or shutil.which("chromium-browser")
-        or shutil.which("chromium")
-    )
-    if _chrome_bin:
-        options.binary_location = _chrome_bin
-
-    # Use webdriver-manager to get the exact matching chromedriver version
-    driver = None
-    try:
-        from webdriver_manager.chrome import ChromeDriverManager  # noqa: PLC0415
-        service = Service(ChromeDriverManager().install())
-        driver = webdriver.Chrome(service=service, options=options)
-    except Exception as exc1:  # noqa: BLE001
-        logger.debug("webdriver-manager failed (%s); trying system chromedriver", exc1)
-
-    # Fall back to system chromedriver path
-    if driver is None:
-        try:
-            _chromedriver_bin = shutil.which("chromedriver") or "/usr/bin/chromedriver"
-            service = Service(_chromedriver_bin)
-            driver = webdriver.Chrome(service=service, options=options)
-        except Exception as exc2:  # noqa: BLE001
-            logger.warning("Selenium: could not start Chrome driver: %s", exc2)
-            return None
-
-    try:
-        driver.get(source_url)
-        time.sleep(6)  # let XHR calls and JS rendering complete
-
-        # --- Try to capture FeatureServer responses from CDP network logs ---
-        captured_json: list[dict] = []
-        try:
-            perf_logs = driver.get_log("performance")
-            for entry in perf_logs:
-                msg = json.loads(entry["message"])["message"]
-                if msg.get("method") != "Network.responseReceived":
-                    continue
-                url = msg.get("params", {}).get("response", {}).get("url", "")
-                if "FeatureServer" in url and "/query" in url:
-                    request_id = msg["params"]["requestId"]
-                    try:
-                        body = driver.execute_cdp_cmd(
-                            "Network.getResponseBody", {"requestId": request_id}
-                        )
-                        data = json.loads(body.get("body", "{}"))
-                        if "features" in data:
-                            captured_json.extend(data["features"])
-                    except Exception:  # noqa: BLE001
-                        pass
-        except Exception as exc:  # noqa: BLE001
-            logger.debug("Selenium CDP log capture failed: %s", exc)
-
-        if captured_json:
-            logger.info("Selenium: captured %d features from FeatureServer XHR", len(captured_json))
-            return [_normalise_rest_record(f.get("attributes", {})) for f in captured_json]
-
-        # --- Scan rendered DOM for embedded FeatureServer URLs ---
-        page_source = driver.page_source
-        matches = re.findall(r'https?://[^"\'<>\s]+?/FeatureServer(?:/\d+)?', page_source)
-        if matches:
-            rest_url = matches[0]
-            if not rest_url.endswith("/0"):
-                rest_url = rest_url.rstrip("/") + "/0"
-            logger.info("Selenium: found FeatureServer URL in rendered DOM: %s", rest_url)
-            records = _fetch_via_rest(rest_url)
-            if records:
-                return records
-
-        # --- Fall back to parsing the rendered HTML table ---
-        soup = BeautifulSoup(page_source, "html.parser")
-        records = _parse_html_table(soup)
-        if records:
-            return records
-
-        logger.warning("Selenium: page loaded but no data extracted")
-        return None
-
-    finally:
-        driver.quit()
-
-
-# ---------------------------------------------------------------------------
-# Strategy 3: Playwright async (fallback for non-Colab environments)
+# Strategy 2: Playwright async (Colab — requires libatk system libs from Cell 1)
 # ---------------------------------------------------------------------------
 
 async def _playwright_async(source_url: str) -> list[dict]:
@@ -465,36 +350,27 @@ def run(settings) -> list[dict]:
     else:
         logger.warning("Strategy 1: no FeatureServer URL found in page source")
 
-    # --- Strategy 2: Selenium + Chrome ---
+    # --- Strategy 2: Playwright headless Chromium ---
     if not records:
-        logger.info("Trying Strategy 2 (Selenium + headless Chrome)")
-        records = _fetch_via_selenium(source_url)
-        if records:
-            logger.info("Strategy 2 (Selenium): fetched %d records", len(records))
-        else:
-            logger.warning("Strategy 2 (Selenium): returned no records")
-
-    # --- Strategy 3: Playwright async (non-Colab fallback) ---
-    if not records:
-        logger.info("Trying Strategy 3 (Playwright async)")
+        logger.info("Trying Strategy 2 (Playwright headless Chromium)")
         records = _fetch_via_playwright(source_url)
         if records:
-            logger.info("Strategy 3 (Playwright): fetched %d records", len(records))
+            logger.info("Strategy 2 (Playwright): fetched %d records", len(records))
         else:
-            logger.warning("Strategy 3 (Playwright): returned no records")
+            logger.warning("Strategy 2 (Playwright): returned no records")
 
-    # --- Strategy 4: Plain BS4 ---
+    # --- Strategy 3: Plain BS4 ---
     if not records:
-        logger.info("Trying Strategy 4 (requests + BeautifulSoup)")
+        logger.info("Trying Strategy 3 (requests + BeautifulSoup)")
         records = _fetch_via_bs4(source_url)
         if records:
-            logger.info("Strategy 4 (BS4): fetched %d records", len(records))
+            logger.info("Strategy 3 (BS4): fetched %d records", len(records))
         else:
-            logger.warning("Strategy 4 (BS4): returned no records")
+            logger.warning("Strategy 3 (BS4): returned no records")
 
     if not records:
         raise RuntimeError(
-            f"All four fetch strategies failed for {source_url}. "
+            f"All three fetch strategies failed for {source_url}. "
             "Check network connectivity and that the source site is reachable."
         )
 
