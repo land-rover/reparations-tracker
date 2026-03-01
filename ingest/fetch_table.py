@@ -72,21 +72,56 @@ _QUERY_PARAMS = {
 
 
 def _probe_page_for_rest_url(source_url: str) -> str | None:
-    """Scan page source for ArcGIS FeatureServer URLs."""
+    """
+    Scan page source and linked JS bundles for ArcGIS FeatureServer URLs.
+
+    ArcGIS Experience Builder apps embed the service URL inside compiled JS
+    chunks, not the initial HTML. We fetch the page, collect <script src>
+    bundle URLs, then search each bundle for a FeatureServer pattern.
+    """
+    _FS_PATTERN = re.compile(r'https?://[^"\'<>\s]+?/FeatureServer(?:/\d+)?')
+
+    def _first_match(text: str) -> str | None:
+        m = _FS_PATTERN.search(text)
+        if not m:
+            return None
+        url = m.group(0)
+        if not url.endswith("/0"):
+            url = url.rstrip("/") + "/0"
+        return url
+
     try:
-        resp = requests.get(source_url, timeout=20)
+        headers = {"User-Agent": "Mozilla/5.0"}
+        resp = requests.get(source_url, headers=headers, timeout=20)
         resp.raise_for_status()
-        # Look for FeatureServer patterns embedded in JS bundles / HTML
-        matches = re.findall(
-            r'https?://[^"\']+?/FeatureServer(?:/\d+)?',
-            resp.text,
-        )
-        if matches:
-            url = matches[0]
-            # Normalise: ensure we have /0 layer
-            if not url.endswith("/0"):
-                url = url.rstrip("/") + "/0"
-            return url
+        html = resp.text
+
+        # Check initial HTML first
+        found = _first_match(html)
+        if found:
+            return found
+
+        # Parse <script src="..."> bundle URLs and scan each
+        from bs4 import BeautifulSoup as _BS  # noqa: PLC0415
+        soup = _BS(html, "html.parser")
+        base = source_url.rstrip("/")
+        checked = 0
+        for tag in soup.find_all("script", src=True):
+            src = tag["src"]
+            if not src.startswith("http"):
+                src = base + "/" + src.lstrip("/")
+            try:
+                js_resp = requests.get(src, headers=headers, timeout=15)
+                js_resp.raise_for_status()
+                found = _first_match(js_resp.text)
+                if found:
+                    return found
+            except Exception:  # noqa: BLE001
+                pass
+            checked += 1
+            if checked >= 20:  # don't scan every bundle
+                break
+
     except Exception as exc:  # noqa: BLE001
         logger.debug("REST probe page scan failed: %s", exc)
     return None
@@ -170,6 +205,9 @@ def _fetch_via_selenium(source_url: str) -> list[dict] | None:
         logger.warning("Selenium not available; skipping")
         return None
 
+    import shutil  # noqa: PLC0415
+    from selenium.webdriver.chrome.service import Service  # noqa: PLC0415
+
     options = Options()
     options.add_argument("--headless")
     options.add_argument("--no-sandbox")
@@ -178,8 +216,23 @@ def _fetch_via_selenium(source_url: str) -> list[dict] | None:
     options.add_argument("--window-size=1920,1080")
     options.set_capability("goog:loggingPrefs", {"performance": "ALL"})
 
+    # Prefer the system chromium installed by chromium-chromedriver (Colab)
+    _chrome_bin = (
+        shutil.which("chromium-browser")
+        or shutil.which("chromium")
+        or shutil.which("google-chrome-stable")
+        or shutil.which("google-chrome")
+    )
+    _chromedriver_bin = (
+        shutil.which("chromedriver")
+        or "/usr/bin/chromedriver"
+    )
+    if _chrome_bin:
+        options.binary_location = _chrome_bin
+
     try:
-        driver = webdriver.Chrome(options=options)
+        service = Service(_chromedriver_bin)
+        driver = webdriver.Chrome(service=service, options=options)
     except Exception as exc:  # noqa: BLE001
         logger.warning("Selenium: could not start Chrome driver: %s", exc)
         return None
