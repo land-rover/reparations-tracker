@@ -1,6 +1,7 @@
 requests
 beautifulsoup4
 selenium
+webdriver-manager
 playwright
 nest_asyncio
 geopandas

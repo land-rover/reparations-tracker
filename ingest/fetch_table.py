@@ -216,26 +216,34 @@ def _fetch_via_selenium(source_url: str) -> list[dict] | None:
     options.add_argument("--window-size=1920,1080")
     options.set_capability("goog:loggingPrefs", {"performance": "ALL"})
 
-    # Prefer the system chromium installed by chromium-chromedriver (Colab)
+    # Detect Chrome binary
     _chrome_bin = (
-        shutil.which("chromium-browser")
-        or shutil.which("chromium")
+        shutil.which("google-chrome")
         or shutil.which("google-chrome-stable")
-        or shutil.which("google-chrome")
-    )
-    _chromedriver_bin = (
-        shutil.which("chromedriver")
-        or "/usr/bin/chromedriver"
+        or shutil.which("chromium-browser")
+        or shutil.which("chromium")
     )
     if _chrome_bin:
         options.binary_location = _chrome_bin
 
+    # Use webdriver-manager to get the exact matching chromedriver version
+    driver = None
     try:
-        service = Service(_chromedriver_bin)
+        from webdriver_manager.chrome import ChromeDriverManager  # noqa: PLC0415
+        service = Service(ChromeDriverManager().install())
         driver = webdriver.Chrome(service=service, options=options)
-    except Exception as exc:  # noqa: BLE001
-        logger.warning("Selenium: could not start Chrome driver: %s", exc)
-        return None
+    except Exception as exc1:  # noqa: BLE001
+        logger.debug("webdriver-manager failed (%s); trying system chromedriver", exc1)
+
+    # Fall back to system chromedriver path
+    if driver is None:
+        try:
+            _chromedriver_bin = shutil.which("chromedriver") or "/usr/bin/chromedriver"
+            service = Service(_chromedriver_bin)
+            driver = webdriver.Chrome(service=service, options=options)
+        except Exception as exc2:  # noqa: BLE001
+            logger.warning("Selenium: could not start Chrome driver: %s", exc2)
+            return None
 
     try:
         driver.get(source_url)
