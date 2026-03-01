@@ -310,24 +310,32 @@ def run(settings) -> list[dict]:
     records = None
     rest_url = _probe_page_for_rest_url(source_url)
     if rest_url:
-        logger.info("Found FeatureServer URL in page source: %s", rest_url)
+        logger.info("Strategy 1: found FeatureServer URL: %s", rest_url)
         records = _fetch_via_rest(rest_url)
         if records:
             logger.info("Strategy 1 (REST API): fetched %d records", len(records))
+        else:
+            logger.warning("Strategy 1: FeatureServer URL found but returned no records")
+    else:
+        logger.warning("Strategy 1: no FeatureServer URL found in page source")
 
     # --- Strategy 2: Playwright ---
     if not records:
-        logger.info("Strategy 1 failed or returned no records; trying Playwright")
+        logger.info("Trying Strategy 2 (Playwright headless browser)")
         records = _fetch_via_playwright(source_url)
         if records:
             logger.info("Strategy 2 (Playwright): fetched %d records", len(records))
+        else:
+            logger.warning("Strategy 2 (Playwright): returned no records")
 
     # --- Strategy 3: Plain BS4 ---
     if not records:
-        logger.info("Strategy 2 failed; trying plain requests + BeautifulSoup")
+        logger.info("Trying Strategy 3 (requests + BeautifulSoup)")
         records = _fetch_via_bs4(source_url)
         if records:
             logger.info("Strategy 3 (BS4): fetched %d records", len(records))
+        else:
+            logger.warning("Strategy 3 (BS4): returned no records")
 
     if not records:
         raise RuntimeError(
