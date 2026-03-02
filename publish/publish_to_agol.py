@@ -701,6 +701,78 @@ def _configure_relates(session: AGOLSession, points_item_id: str,
 
 
 # ---------------------------------------------------------------------------
+# Hosted table creation via createService (for non-geographic tables)
+# ---------------------------------------------------------------------------
+
+def _infer_field_type(value) -> str:
+    if isinstance(value, bool):
+        return "esriFieldTypeSmallInteger"
+    if isinstance(value, int):
+        return "esriFieldTypeInteger"
+    if isinstance(value, float):
+        return "esriFieldTypeDouble"
+    return "esriFieldTypeString"
+
+
+def _create_table_service(session: AGOLSession, name: str,
+                           description: str, records: list[dict]) -> tuple[str, str]:
+    """
+    Create a hosted non-geographic table via createService + addToDefinition.
+    Returns (service_item_id, service_url).
+    """
+    safe_name = re.sub(r"[^A-Za-z0-9_]", "_", name)
+    create_params = json.dumps({
+        "name": safe_name,
+        "serviceDescription": description,
+        "hasStaticData": False,
+        "capabilities": "Query,Editing",
+    })
+    resp = session.post(
+        f"{_user_url(session)}/createService",
+        data={"createParameters": create_params, "outputType": "featureService"},
+    )
+    resp.raise_for_status()
+    result = resp.json()
+    if not result.get("success"):
+        raise RuntimeError(f"createService failed: {result}")
+
+    service_url = (result.get("serviceurl") or result.get("serviceUrl", "")).rstrip("/")
+    service_item_id = result.get("itemId", "")
+    logger.info("Created empty Feature Service '%s': %s", name, service_url)
+
+    # Build field definitions from first record
+    fields = []
+    if records:
+        for k, v in records[0].items():
+            fdef = {
+                "name": k,
+                "type": _infer_field_type(v),
+                "alias": k,
+                "nullable": True,
+                "editable": True,
+            }
+            if fdef["type"] == "esriFieldTypeString":
+                fdef["length"] = 2000
+            fields.append(fdef)
+
+    table_def = json.dumps({
+        "tables": [{
+            "name": name,
+            "type": "Table",
+            "fields": fields,
+        }]
+    })
+    resp2 = session.post(
+        f"{service_url}/addToDefinition",
+        data={"addToDefinition": table_def},
+    )
+    resp2.raise_for_status()
+    logger.info("addToDefinition result: %s", resp2.json())
+
+    return service_item_id, service_url
+
+
+# ---------------------------------------------------------------------------
 # Publish or overwrite a single layer
 # ---------------------------------------------------------------------------
 
@@ -724,35 +796,59 @@ def _publish_or_overwrite(
     description = f"Reparations Tracker — {title}"
 
     if not current_item_id:
-        # First run: create item and publish
+        # First run: create
         logger.info("First run: creating '%s'", title)
-        upload_id = _add_item(
-            session, title, item_type, tags, description, file_path=source_path
-        )
-        logger.info("Uploaded item %s for '%s'", upload_id, title)
-
-        service_item_id = _publish_item(session, upload_id, title, file_type)
-        logger.info("Published '%s' as service item %s", title, service_item_id)
-        return service_item_id
+        if is_table:
+            # Tables: use createService (upload+publish doesn't work for JSON tables)
+            with open(source_path, encoding="utf-8") as fh:
+                records = json.load(fh)
+            service_item_id, _ = _create_table_service(session, title, description, records)
+            logger.info("Created table service '%s' as item %s", title, service_item_id)
+            return service_item_id
+        else:
+            upload_id = _add_item(
+                session, title, item_type, tags, description, file_path=source_path
+            )
+            logger.info("Uploaded item %s for '%s'", upload_id, title)
+            service_item_id = _publish_item(session, upload_id, title, file_type)
+            logger.info("Published '%s' as service item %s", title, service_item_id)
+            return service_item_id
 
     # Subsequent runs: overwrite data in place
     logger.info("Overwriting existing layer '%s' (item %s)", title, current_item_id)
     try:
         service_url = _get_service_url(session, current_item_id)
     except RuntimeError:
-        # Stored ID may be a raw upload item rather than the published service.
-        # Search for the actual Feature Service by title and update settings.
+        # Stored item may be a stale upload (not a published service).
+        # Try to find the real service; if absent, delete the stale item and recreate.
         logger.warning(
             "Stored item %s has no service URL; searching for published service '%s'",
             current_item_id, title,
         )
         found_id = _find_service_item_by_title(session, title)
-        if not found_id:
+        if found_id:
+            logger.info("Found service item %s; updating settings.py", found_id)
+            _write_item_id_to_settings(item_id_field, found_id)
+            current_item_id = found_id
+            service_url = _get_service_url(session, found_id)
+        elif is_table:
+            # Delete the stale upload item and create a fresh service
+            logger.warning("Deleting stale item %s and recreating as table service", current_item_id)
+            _delete_item(session, current_item_id)
+            _write_item_id_to_settings(item_id_field, "")
+            with open(source_path, encoding="utf-8") as fh:
+                records = json.load(fh)
+            service_item_id, service_url = _create_table_service(
+                session, title, description, records
+            )
+            _write_item_id_to_settings(item_id_field, service_item_id)
+            # Append features directly (table was just created empty)
+            features = _json_to_agol_features(source_path)
+            _append_features(service_url, session, features, layer=0)
+            logger.info("Appended %d features to '%s'", len(features), title)
+            return service_item_id
+        else:
             raise
-        logger.info("Found service item %s for '%s'; updating settings.py", found_id, title)
-        _write_item_id_to_settings(item_id_field, found_id)
-        current_item_id = found_id
-        service_url = _get_service_url(session, found_id)
 
     _safety_check(service_url, session, new_feature_count, min_ratio)
 
