@@ -94,6 +94,22 @@ class AGOLSession:
 
 
 # ---------------------------------------------------------------------------
+# Diagnostic helper
+# ---------------------------------------------------------------------------
+
+def _json(resp: requests.Response, label: str = "") -> dict:
+    """Parse JSON; on failure log URL, status, and body snippet before re-raising."""
+    try:
+        return resp.json()
+    except Exception:
+        logger.error(
+            "Non-JSON response [%s]: url=%s status=%d body=%r",
+            label, getattr(resp, "url", "?"), resp.status_code, resp.text[:500],
+        )
+        raise
+
+
+# ---------------------------------------------------------------------------
 # Item management helpers
 # ---------------------------------------------------------------------------
 
@@ -284,7 +300,7 @@ def _get_feature_count(service_url: str, session: AGOLSession, layer: int = 0) -
         f"{service_url}/FeatureServer/{layer}/query",
         params={"where": "1=1", "returnCountOnly": "true"},
     )
-    return resp.json().get("count", 0)
+    return _json(resp, "getFeatureCount").get("count", 0)
 
 
 # ---------------------------------------------------------------------------
@@ -296,7 +312,7 @@ def _truncate_layer(service_url: str, session: AGOLSession, layer: int = 0) -> N
         f"{service_url}/FeatureServer/{layer}/deleteFeatures",
         data={"where": "1=1"},
     )
-    data = resp.json()
+    data = _json(resp, "truncateLayer")
     logger.debug("Truncate result: %s", data)
 
 
@@ -311,7 +327,7 @@ def _append_features(service_url: str, session: AGOLSession,
             f"{service_url}/FeatureServer/{layer}/addFeatures",
             data={"features": json.dumps(batch)},
         )
-        result = resp.json()
+        result = _json(resp, "addFeatures")
         added = len(result.get("addResults", []))
         logger.info("  Added batch %d-%d (%d features)", i, i + len(batch), added)
 
@@ -779,7 +795,7 @@ def _create_table_service(session: AGOLSession, name: str,
         data={"addToDefinition": table_def},
     )
     resp2.raise_for_status()
-    logger.info("addToDefinition result: %s", resp2.json())
+    logger.info("addToDefinition result: %s", _json(resp2, "addToDefinition"))
 
     # Return the base URL (without /FeatureServer) — callers append /FeatureServer/{layer}/...
     # just like _get_service_url does with the portal item's url field.
