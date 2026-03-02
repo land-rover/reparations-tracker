@@ -254,13 +254,20 @@ def _find_service_item_by_title(session: AGOLSession, title: str) -> str:
 
 
 def _get_service_url(session: AGOLSession, item_id: str) -> str:
-    """Resolve the FeatureServer URL for an item."""
+    """Return the base service URL for an item (without /FeatureServer suffix).
+
+    Callers append /FeatureServer/{layer}/... themselves.
+    AGOL portal items may store the URL with or without the /FeatureServer suffix;
+    this normalises to the form without it.
+    """
     resp = session.get(f"{_portal_base(session._settings)}/content/items/{item_id}")
     data = resp.json()
-    url = data.get("url") or ""
+    url = (data.get("url") or "").rstrip("/")
     if not url:
         raise RuntimeError(f"No service URL for item {item_id}: {data}")
-    return url.rstrip("/")
+    if url.endswith("/FeatureServer"):
+        url = url[: -len("/FeatureServer")]
+    return url
 
 
 def _get_org_id(session: AGOLSession) -> str:
@@ -642,16 +649,20 @@ def _configure_relates(session: AGOLSession, points_item_id: str,
     AGOL REST does not have a single-call 'setRelates' endpoint.
     We update the item's layerDefinitions via PATCH on the feature service.
     """
-    # Get the service URL for Layer 1
+    def _strip_fs(url: str) -> str:
+        url = url.rstrip("/")
+        return url[: -len("/FeatureServer")] if url.endswith("/FeatureServer") else url
+
+    # Get the base service URL for Layer 1
     resp = session.get(f"{_portal_base(session._settings)}/content/items/{points_item_id}")
-    service_url = (resp.json().get("url") or "").rstrip("/")
+    service_url = _strip_fs(resp.json().get("url") or "")
     if not service_url:
         logger.warning("Could not get service URL for points item; skipping relates config")
         return
 
-    # Get Layer 2 service URL
+    # Get Layer 2 base service URL
     resp2 = session.get(f"{_portal_base(session._settings)}/content/items/{legislators_item_id}")
-    leg_url = (resp2.json().get("url") or "").rstrip("/")
+    leg_url = _strip_fs(resp2.json().get("url") or "")
     if not leg_url:
         logger.warning("Could not get service URL for legislators item; skipping relates config")
         return
