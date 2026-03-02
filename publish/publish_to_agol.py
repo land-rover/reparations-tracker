@@ -29,9 +29,12 @@ import requests
 
 logger = logging.getLogger(__name__)
 
-AGOL_BASE = "https://www.arcgis.com/sharing/rest"
-AGOL_ORG_CONTENT = AGOL_BASE + "/content/users/{username}"
-TOKEN_ENDPOINT = AGOL_BASE + "/generateToken"
+def _portal_base(settings=None) -> str:
+    """Return the sharing/rest base URL for the configured portal."""
+    portal = "https://www.arcgis.com"
+    if settings is not None:
+        portal = getattr(settings, "AGOL_PORTAL_URL", portal).rstrip("/")
+    return f"{portal}/sharing/rest"
 
 
 # ---------------------------------------------------------------------------
@@ -41,20 +44,22 @@ TOKEN_ENDPOINT = AGOL_BASE + "/generateToken"
 class AGOLSession:
     """Thin ArcGIS Online REST session with automatic token refresh."""
 
-    def __init__(self, username: str, password: str):
+    def __init__(self, username: str, password: str, settings=None):
         self.username = username
         self.password = password
+        self._settings = settings
         self._token: str = ""
         self._token_expires: float = 0.0
         self._refresh()
 
     def _refresh(self) -> None:
+        token_endpoint = _portal_base(self._settings) + "/generateToken"
         resp = requests.post(
-            TOKEN_ENDPOINT,
+            token_endpoint,
             data={
                 "username": self.username,
                 "password": self.password,
-                "referer": "https://www.arcgis.com",
+                "referer": _portal_base(self._settings).split("/sharing")[0],
                 "expiration": 120,
                 "f": "json",
             },
@@ -93,7 +98,7 @@ class AGOLSession:
 # ---------------------------------------------------------------------------
 
 def _user_url(session: AGOLSession) -> str:
-    return AGOL_ORG_CONTENT.format(username=session.username)
+    return _portal_base(session._settings) + f"/content/users/{session.username}"
 
 
 def _add_item(session: AGOLSession, title: str, item_type: str,
@@ -163,7 +168,7 @@ def _delete_item(session: AGOLSession, item_id: str) -> None:
 def _purge_trash_by_name(session: AGOLSession, title: str) -> None:
     """Find items in Trash matching title and purge them."""
     resp = session.get(
-        f"{AGOL_BASE}/search",
+        f"{_portal_base(session._settings)}/search",
         params={"q": f'title:"{title}" owner:{session.username}', "num": 10},
     )
     items = resp.json().get("results", [])
@@ -229,7 +234,7 @@ def _poll_job(session: AGOLSession, item_id: str, job_id: str,
 
 def _get_service_url(session: AGOLSession, item_id: str) -> str:
     """Resolve the FeatureServer URL for an item."""
-    resp = session.get(f"{AGOL_BASE}/content/items/{item_id}")
+    resp = session.get(f"{_portal_base(session._settings)}/content/items/{item_id}")
     data = resp.json()
     url = data.get("url", "")
     if not url:
@@ -238,7 +243,7 @@ def _get_service_url(session: AGOLSession, item_id: str) -> str:
 
 
 def _get_org_id(session: AGOLSession) -> str:
-    resp = session.get(f"{AGOL_BASE}/portals/self")
+    resp = session.get(f"{_portal_base(session._settings)}/portals/self")
     return resp.json().get("id", "")
 
 
@@ -608,14 +613,14 @@ def _configure_relates(session: AGOLSession, points_item_id: str,
     We update the item's layerDefinitions via PATCH on the feature service.
     """
     # Get the service URL for Layer 1
-    resp = session.get(f"{AGOL_BASE}/content/items/{points_item_id}")
+    resp = session.get(f"{_portal_base(session._settings)}/content/items/{points_item_id}")
     service_url = resp.json().get("url", "").rstrip("/")
     if not service_url:
         logger.warning("Could not get service URL for points item; skipping relates config")
         return
 
     # Get Layer 2 service URL
-    resp2 = session.get(f"{AGOL_BASE}/content/items/{legislators_item_id}")
+    resp2 = session.get(f"{_portal_base(session._settings)}/content/items/{legislators_item_id}")
     leg_url = resp2.json().get("url", "").rstrip("/")
     if not leg_url:
         logger.warning("Could not get service URL for legislators item; skipping relates config")
@@ -738,7 +743,7 @@ def run(settings) -> None:
             "In Colab: add them as secrets and run Cell 3 before this cell."
         )
 
-    session = AGOLSession(username, password)
+    session = AGOLSession(username, password, settings)
 
     # --- Count new records for safety checks ---
     with open(settings.ENRICHED_DATA_PATH, encoding="utf-8") as fh:

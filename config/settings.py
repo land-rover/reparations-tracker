@@ -25,6 +25,9 @@ TIGER_STATE_URL  = "https://www2.census.gov/geo/tiger/TIGER2024/STATE/tl_2024_us
 
 SOURCE_URL = "https://www.reparationsresources.com/table"
 
+# ArcGIS Online portal URL — set to your organization's portal
+AGOL_PORTAL_URL = "https://nga.maps.arcgis.com"
+
 # ArcGIS Online item IDs — populated after first publish run; do not edit manually
 AGOL_POINTS_ITEM_ID      = ""   # Layer 1: Reparations_Initiatives_Points
 AGOL_LEGISLATORS_ITEM_ID = ""   # Layer 2: Reparations_Legislators_Summary
