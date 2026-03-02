@@ -59,7 +59,7 @@ class AGOLSession:
             data={
                 "username": self.username,
                 "password": self.password,
-                "referer": _portal_base(self._settings).split("/sharing")[0],
+                "referer": "https://www.arcgis.com",
                 "expiration": 120,
                 "f": "json",
             },
@@ -513,8 +513,17 @@ def _build_states_geojson(settings, enriched_geojson: str, legislators_json: str
         state = p.get("state", "")
         state_init_ids.setdefault(state, set()).add(p.get("initiative_id", ""))
 
-    # Load state boundaries
+    # Download state boundaries if not already cached
     state_path = settings.TIGER_STATE_CACHE_PATH
+    if not os.path.exists(state_path):
+        os.makedirs(os.path.dirname(state_path), exist_ok=True)
+        logger.info("Downloading TIGER state boundaries...")
+        r = requests.get(settings.TIGER_STATE_URL, timeout=120, stream=True)
+        r.raise_for_status()
+        with open(state_path, "wb") as fh:
+            for chunk in r.iter_content(65536):
+                fh.write(chunk)
+        logger.info("Downloaded state boundaries to %s", state_path)
     states_gdf = gpd.read_file(f"zip://{state_path}").to_crs(epsg=4326)
 
     _FIPS_TO_STATE = {v: k for k, v in {
