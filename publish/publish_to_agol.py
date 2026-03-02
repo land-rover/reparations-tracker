@@ -236,7 +236,7 @@ def _get_service_url(session: AGOLSession, item_id: str) -> str:
     """Resolve the FeatureServer URL for an item."""
     resp = session.get(f"{_portal_base(session._settings)}/content/items/{item_id}")
     data = resp.json()
-    url = data.get("url", "")
+    url = data.get("url") or ""
     if not url:
         raise RuntimeError(f"No service URL for item {item_id}: {data}")
     return url.rstrip("/")
@@ -623,14 +623,14 @@ def _configure_relates(session: AGOLSession, points_item_id: str,
     """
     # Get the service URL for Layer 1
     resp = session.get(f"{_portal_base(session._settings)}/content/items/{points_item_id}")
-    service_url = resp.json().get("url", "").rstrip("/")
+    service_url = (resp.json().get("url") or "").rstrip("/")
     if not service_url:
         logger.warning("Could not get service URL for points item; skipping relates config")
         return
 
     # Get Layer 2 service URL
     resp2 = session.get(f"{_portal_base(session._settings)}/content/items/{legislators_item_id}")
-    leg_url = resp2.json().get("url", "").rstrip("/")
+    leg_url = (resp2.json().get("url") or "").rstrip("/")
     if not leg_url:
         logger.warning("Could not get service URL for legislators item; skipping relates config")
         return
