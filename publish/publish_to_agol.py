@@ -205,6 +205,12 @@ def _publish_item(session: AGOLSession, item_id: str, name: str,
     if job_id:
         _poll_job(session, item_id, job_id)
 
+    # serviceItemId is sometimes absent in async responses; search by title as fallback
+    if not service_item_id or service_item_id == item_id:
+        found = _find_service_item_by_title(session, name)
+        if found:
+            service_item_id = found
+
     return service_item_id or item_id
 
 
@@ -231,6 +237,21 @@ def _poll_job(session: AGOLSession, item_id: str, job_id: str,
 # ---------------------------------------------------------------------------
 # Feature layer service URL resolution
 # ---------------------------------------------------------------------------
+
+def _find_service_item_by_title(session: AGOLSession, title: str) -> str:
+    """Search for a published Feature Service item by exact title. Returns item ID or ''."""
+    resp = session.get(
+        f"{_portal_base(session._settings)}/search",
+        params={
+            "q": f'title:"{title}" owner:{session.username} type:"Feature Service"',
+            "num": 10,
+        },
+    )
+    for item in resp.json().get("results", []):
+        if item.get("title") == title:
+            return item["id"]
+    return ""
+
 
 def _get_service_url(session: AGOLSession, item_id: str) -> str:
     """Resolve the FeatureServer URL for an item."""
@@ -716,7 +737,22 @@ def _publish_or_overwrite(
 
     # Subsequent runs: overwrite data in place
     logger.info("Overwriting existing layer '%s' (item %s)", title, current_item_id)
-    service_url = _get_service_url(session, current_item_id)
+    try:
+        service_url = _get_service_url(session, current_item_id)
+    except RuntimeError:
+        # Stored ID may be a raw upload item rather than the published service.
+        # Search for the actual Feature Service by title and update settings.
+        logger.warning(
+            "Stored item %s has no service URL; searching for published service '%s'",
+            current_item_id, title,
+        )
+        found_id = _find_service_item_by_title(session, title)
+        if not found_id:
+            raise
+        logger.info("Found service item %s for '%s'; updating settings.py", found_id, title)
+        _write_item_id_to_settings(item_id_field, found_id)
+        current_item_id = found_id
+        service_url = _get_service_url(session, found_id)
 
     _safety_check(service_url, session, new_feature_count, min_ratio)
 
