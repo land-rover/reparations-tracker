@@ -736,9 +736,9 @@ def _create_table_service(session: AGOLSession, name: str,
     if not result.get("success"):
         raise RuntimeError(f"createService failed: {result}")
 
-    service_url = (result.get("serviceurl") or result.get("serviceUrl", "")).rstrip("/")
+    fs_url = (result.get("serviceurl") or result.get("serviceUrl", "")).rstrip("/")
     service_item_id = result.get("itemId", "")
-    logger.info("Created empty Feature Service '%s': %s", name, service_url)
+    logger.info("Created empty Feature Service '%s': %s", name, fs_url)
 
     # Build field definitions from first record
     fields = []
@@ -762,14 +762,18 @@ def _create_table_service(session: AGOLSession, name: str,
             "fields": fields,
         }]
     })
+    # addToDefinition lives on the FeatureServer URL
     resp2 = session.post(
-        f"{service_url}/addToDefinition",
+        f"{fs_url}/addToDefinition",
         data={"addToDefinition": table_def},
     )
     resp2.raise_for_status()
     logger.info("addToDefinition result: %s", resp2.json())
 
-    return service_item_id, service_url
+    # Return the base URL (without /FeatureServer) — callers append /FeatureServer/{layer}/...
+    # just like _get_service_url does with the portal item's url field.
+    base_url = fs_url[: -len("/FeatureServer")] if fs_url.endswith("/FeatureServer") else fs_url
+    return service_item_id, base_url
 
 
 # ---------------------------------------------------------------------------
